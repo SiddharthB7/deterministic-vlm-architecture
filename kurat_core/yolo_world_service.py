@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import os
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -8,7 +9,14 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 import torch
+
+YOLO_CONFIG_DIR = Path.cwd() / "results" / "runtime_artifacts" / ".yolo_config"
+YOLO_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("YOLO_CONFIG_DIR", str(YOLO_CONFIG_DIR))
+
 from ultralytics import YOLO
+
+from .power_manager import PowerAwareExecutionManager
 
 
 FALLBACK_VOCAB = [
@@ -56,7 +64,7 @@ STOPWORDS = {
 class YoloWorldService:
     def __init__(
         self,
-        model_path: str = "yolov8s-world.pt",
+        model_path: str = "assets/models/yolov8s-world.pt",
         device: str = "cpu",
         imgsz: int = 1280,
         conf: float = 0.20,
@@ -64,6 +72,7 @@ class YoloWorldService:
         max_det: int = 200,
         debug_save_images: bool = False,
         debug_image_dir: str = "debug_frames",
+        execution_manager: PowerAwareExecutionManager | None = None,
     ):
         self.model_path = model_path
         self.device = device
@@ -73,9 +82,21 @@ class YoloWorldService:
         self.max_det = max_det
         self.debug_save_images = debug_save_images
         self.debug_image_dir = Path(debug_image_dir)
+        # Shared execution manager serializes detector load and inference under Jetson power-aware mode.
+        self.execution_manager = execution_manager
 
-        with self._trusted_torch_load():
-            self.model = YOLO(model_path)
+        def _load_model():
+            with self._trusted_torch_load():
+                return YOLO(model_path)
+
+        if self.execution_manager is None:
+            self.model = _load_model()
+        else:
+            self.model = self.execution_manager.run_heavy_task(
+                task_name="yolo_model_load",
+                model_name=model_path,
+                func=_load_model,
+            )
         try:
             self.model.to(device)
         except Exception:
@@ -181,17 +202,27 @@ class YoloWorldService:
         stage: str,
         save_annotated: bool,
     ) -> Dict[str, object]:
-        self._set_vocabulary(vocab)
-        results = self.model.predict(
-            source=self._to_bgr_uint8(image_rgb),
-            conf=self.conf,
-            iou=self.iou,
-            imgsz=self.imgsz,
-            max_det=self.max_det,
-            device=self.device,
-            verbose=False,
-            save=False,
-        )[0]
+        def _predict():
+            self._set_vocabulary(vocab)
+            return self.model.predict(
+                source=self._to_bgr_uint8(image_rgb),
+                conf=self.conf,
+                iou=self.iou,
+                imgsz=self.imgsz,
+                max_det=self.max_det,
+                device=self.device,
+                verbose=False,
+                save=False,
+            )[0]
+
+        if self.execution_manager is None:
+            results = _predict()
+        else:
+            results = self.execution_manager.run_heavy_task(
+                task_name=f"yolo_detect_{stage}",
+                model_name=self.model_path,
+                func=_predict,
+            )
 
         detections = self._extract_detections(results, canonical_map)
         annotated_path = None

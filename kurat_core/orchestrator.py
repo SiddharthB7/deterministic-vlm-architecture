@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import cv2
 import logging
+import threading
 from dataclasses import asdict
 from typing import Any, Dict, Optional, Tuple
 
 from .interfaces import ChatService, IntentRouter, LatestFrameProvider
 from .moondream_service import MoondreamService
+from .power_manager import PowerAwareExecutionManager
 from .types import IntentResult, OrchestratorResult, VisionResult
 from .yolo_world_service import YoloWorldService
 
@@ -27,6 +29,7 @@ class KuratOrchestrator:
         skip_stale_frames: bool = True,
         moondream_frame_max_dim: int = 768,
         yolo_frame_max_dim: int = 960,
+        execution_manager: PowerAwareExecutionManager | None = None,
     ):
         self.frame_provider = frame_provider
         self.router = intent_router
@@ -38,55 +41,62 @@ class KuratOrchestrator:
         self.skip_stale_frames = skip_stale_frames
         self.moondream_frame_max_dim = moondream_frame_max_dim
         self.yolo_frame_max_dim = yolo_frame_max_dim
+        # This lightweight request lock prevents overlapping prompt handling across threads.
+        self._request_lock = threading.Lock()
+        self.execution_manager = execution_manager
 
     def handle_text(self, user_text: str, history: str = "") -> OrchestratorResult:
-        intent = self._safe_classify(user_text)
-        LOGGER.debug(
-            "Intent classified: mode=%s targets=%s confidence=%.3f",
-            intent.mode,
-            intent.targets,
-            intent.confidence,
-        )
+        if self.execution_manager is not None:
+            self.execution_manager.before_prompt("handle_text")
 
-        if intent.mode == "chat":
-            reply = self._safe_normal_chat(user_text, history=history)
+        with self._request_lock:
+            intent = self._safe_classify(user_text)
+            LOGGER.debug(
+                "Intent classified: mode=%s targets=%s confidence=%.3f",
+                intent.mode,
+                intent.targets,
+                intent.confidence,
+            )
+
+            if intent.mode == "chat":
+                reply = self._safe_normal_chat(user_text, history=history)
+                return OrchestratorResult(
+                    user_text=user_text,
+                    intent=intent,
+                    vision_used=False,
+                    vision_result=None,
+                    reply_text=reply,
+                )
+
+            frame, frame_meta, frame_error = self._get_latest_frame_for_vision()
+            if frame is None:
+                LOGGER.warning("Vision query could not use a frame: %s", frame_error)
+                payload = {
+                    "method": "vision_unavailable",
+                    "reason": frame_error,
+                    "frame_meta": frame_meta,
+                }
+                return OrchestratorResult(
+                    user_text=user_text,
+                    intent=intent,
+                    vision_used=False,
+                    vision_result=VisionResult(method=payload["method"], payload=payload),
+                    reply_text=self._build_no_frame_reply(frame_error),
+                )
+
+            vision_payload = self._run_vision(intent, user_text, frame)
+            if frame_meta is not None:
+                vision_payload["frame_meta"] = frame_meta
+            vision_result = VisionResult(method=vision_payload["method"], payload=vision_payload)
+            reply = self._safe_answer_with_vision(user_text, vision_payload, history=history)
+
             return OrchestratorResult(
                 user_text=user_text,
                 intent=intent,
-                vision_used=False,
-                vision_result=None,
+                vision_used=True,
+                vision_result=vision_result,
                 reply_text=reply,
             )
-
-        frame, frame_meta, frame_error = self._get_latest_frame_for_vision()
-        if frame is None:
-            LOGGER.warning("Vision query could not use a frame: %s", frame_error)
-            payload = {
-                "method": "vision_unavailable",
-                "reason": frame_error,
-                "frame_meta": frame_meta,
-            }
-            return OrchestratorResult(
-                user_text=user_text,
-                intent=intent,
-                vision_used=False,
-                vision_result=VisionResult(method=payload["method"], payload=payload),
-                reply_text=self._build_no_frame_reply(frame_error),
-            )
-
-        vision_payload = self._run_vision(intent, user_text, frame)
-        if frame_meta is not None:
-            vision_payload["frame_meta"] = frame_meta
-        vision_result = VisionResult(method=vision_payload["method"], payload=vision_payload)
-        reply = self._safe_answer_with_vision(user_text, vision_payload, history=history)
-
-        return OrchestratorResult(
-            user_text=user_text,
-            intent=intent,
-            vision_used=True,
-            vision_result=vision_result,
-            reply_text=reply,
-        )
 
     def handle_text_dict(self, user_text: str, history: str = "") -> Dict[str, Any]:
         result = self.handle_text(user_text, history=history)

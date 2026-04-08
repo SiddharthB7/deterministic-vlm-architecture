@@ -12,6 +12,8 @@ import numpy as np
 import ollama
 from PIL import Image
 
+from .power_manager import PowerAwareExecutionManager
+
 
 ImageInput = Union[Image.Image, np.ndarray]
 LOGGER = logging.getLogger(__name__)
@@ -23,10 +25,13 @@ class MoondreamService:
         model: str = "moondream",
         host: Optional[str] = None,
         temperature: float = 0.0,
+        execution_manager: PowerAwareExecutionManager | None = None,
     ):
         self.model = model
         self.host = host or os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
         self.temperature = temperature
+        # Shared execution manager serializes heavy VLM inference under Jetson power-aware mode.
+        self.execution_manager = execution_manager
         self.client = ollama.Client(host=self.host)
         self._verify_model()
 
@@ -139,18 +144,27 @@ class MoondreamService:
             raise RuntimeError(f"Ollama unavailable: {exc}") from exc
 
     def _query(self, image: ImageInput, prompt: str) -> str:
-        b64 = self._encode_image(image)
-        resp = self.client.chat(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt, "images": [b64]}],
-            options={"temperature": self.temperature},
-        )
+        def _request() -> str:
+            b64 = self._encode_image(image)
+            resp = self.client.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt, "images": [b64]}],
+                options={"temperature": self.temperature},
+            )
 
-        if isinstance(resp, dict):
-            return (resp.get("message", {}).get("content", "")).strip()
-        if hasattr(resp, "message"):
-            return (resp.message.content or "").strip()
-        return ""
+            if isinstance(resp, dict):
+                return (resp.get("message", {}).get("content", "")).strip()
+            if hasattr(resp, "message"):
+                return (resp.message.content or "").strip()
+            return ""
+
+        if self.execution_manager is None:
+            return _request()
+        return self.execution_manager.run_heavy_task(
+            task_name="semantic_vision",
+            model_name=self.model,
+            func=_request,
+        )
 
     def _build_analyze_prompt(self, question: str, target: str) -> str:
         schema_lines = [

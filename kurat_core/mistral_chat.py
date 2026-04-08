@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import requests
 
+from .power_manager import PowerAwareExecutionManager
+
 
 class MistralChat:
     def __init__(
@@ -9,10 +11,13 @@ class MistralChat:
         model: str = "mistral",
         ollama_url: str = "http://127.0.0.1:11434/api/generate",
         timeout_s: int = 180,
+        execution_manager: PowerAwareExecutionManager | None = None,
     ):
         self.model = model
         self.ollama_url = ollama_url
         self.timeout_s = timeout_s
+        # Shared execution manager serializes heavy language inference under Jetson power-aware mode.
+        self.execution_manager = execution_manager
 
     def normal_chat(self, user_text: str, history: str = "") -> str:
         prompt = f"""You are Kurat, a helpful robot assistant.
@@ -53,15 +58,25 @@ Assistant:"""
         return self._gen(prompt, temperature=0.2)
 
     def _gen(self, prompt: str, temperature: float) -> str:
-        response = requests.post(
-            self.ollama_url,
-            json={
-                "model": self.model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": temperature},
-            },
-            timeout=self.timeout_s,
+        def _request() -> str:
+            response = requests.post(
+                self.ollama_url,
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"temperature": temperature},
+                },
+                timeout=self.timeout_s,
+            )
+            response.raise_for_status()
+            return (response.json().get("response") or "").strip()
+
+        if self.execution_manager is None:
+            return _request()
+        return self.execution_manager.run_heavy_task(
+            task_name="language_answer",
+            model_name=self.model,
+            func=_request,
+            timeout_s=self.timeout_s,
         )
-        response.raise_for_status()
-        return (response.json().get("response") or "").strip()

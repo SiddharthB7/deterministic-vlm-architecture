@@ -12,13 +12,20 @@ class LatestFrameProvider(Protocol):
     def get_latest_rgb_frame(self) -> Optional[np.ndarray]:
         ...
 
-    def get_latest_rgb_frame_with_meta(self) -> Optional[Dict[str, Any]]:
+    def get_latest_rgb_frame_with_meta(
+        self,
+        max_age_s: Optional[float] = None,
+        reject_stale: Optional[bool] = None,
+    ) -> Optional[Dict[str, Any]]:
         ...
 
     def get_latest_rgb_pil(self) -> Optional[Image.Image]:
         ...
 
     def get_latest_timestamp(self) -> Any:
+        ...
+
+    def get_latest_frame_age_seconds(self) -> Optional[float]:
         ...
 
 

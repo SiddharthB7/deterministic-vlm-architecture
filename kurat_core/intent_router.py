@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 
 import requests
 
+from .power_manager import PowerAwareExecutionManager
 from .types import IntentResult
 
 
@@ -76,10 +77,13 @@ class MistralIntentRouter:
         model: str = "mistral",
         ollama_url: str = "http://127.0.0.1:11434/api/generate",
         timeout_s: int = 120,
+        execution_manager: PowerAwareExecutionManager | None = None,
     ):
         self.model = model
         self.ollama_url = ollama_url
         self.timeout_s = timeout_s
+        # Shared execution manager serializes heavy language inference under Jetson power-aware mode.
+        self.execution_manager = execution_manager
 
     def classify(self, user_text: str) -> IntentResult:
         user_text = (user_text or "").strip()
@@ -139,18 +143,28 @@ vision_hint: {str(hint).lower()}
 JSON:"""
 
     def _ollama_generate(self, prompt: str) -> str:
-        response = requests.post(
-            self.ollama_url,
-            json={
-                "model": self.model,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.0},
-            },
-            timeout=self.timeout_s,
+        def _request() -> str:
+            response = requests.post(
+                self.ollama_url,
+                json={
+                    "model": self.model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"temperature": 0.0},
+                },
+                timeout=self.timeout_s,
+            )
+            response.raise_for_status()
+            return (response.json().get("response") or "").strip()
+
+        if self.execution_manager is None:
+            return _request()
+        return self.execution_manager.run_heavy_task(
+            task_name="intent_routing",
+            model_name=self.model,
+            func=_request,
+            timeout_s=self.timeout_s,
         )
-        response.raise_for_status()
-        return (response.json().get("response") or "").strip()
 
     def _safe_json(self, text: str) -> Dict[str, Any]:
         try:
