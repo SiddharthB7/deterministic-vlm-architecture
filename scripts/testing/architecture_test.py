@@ -79,7 +79,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Quick laptop smoke test for the new Kurat architecture.")
     parser.add_argument(
         "--image",
-        default="assets/sample_images/raw/test_image.png",
+        default="",
         help="Path to an image file used as the current frame.",
     )
     parser.add_argument(
@@ -95,6 +95,9 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
+
+    if not args.image:
+        parser.error("Provide --image PATH. No sample image is bundled in this repository.")
 
     orchestrator = build_orchestrator(args.image)
     result = orchestrator.handle_text(args.query)

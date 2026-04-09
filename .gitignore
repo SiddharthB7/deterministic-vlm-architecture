@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 debug_frames/
 old code/
+results/
+assets/models/*.pt
+assets/sample_images/raw/*
+!assets/sample_images/raw/.gitkeep

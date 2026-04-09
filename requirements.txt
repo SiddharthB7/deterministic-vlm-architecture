@@ -1,0 +1,9 @@
+requests
+Pillow
+numpy
+opencv-python
+ollama
+ultralytics
+torch
+torchvision
+git+https://github.com/ultralytics/CLIP.git

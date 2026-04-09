@@ -84,10 +84,11 @@ class YoloWorldService:
         self.debug_image_dir = Path(debug_image_dir)
         # Shared execution manager serializes detector load and inference under Jetson power-aware mode.
         self.execution_manager = execution_manager
+        self._resolved_model_path = self._resolve_model_path(model_path)
 
         def _load_model():
             with self._trusted_torch_load():
-                return YOLO(model_path)
+                return YOLO(self._resolved_model_path)
 
         if self.execution_manager is None:
             self.model = _load_model()
@@ -103,6 +104,17 @@ class YoloWorldService:
             pass
 
         self._last_vocab: Optional[Tuple[str, ...]] = None
+
+    def _resolve_model_path(self, model_path: str) -> str:
+        requested_path = Path(model_path)
+        if requested_path.exists():
+            return str(requested_path)
+
+        requested_path.parent.mkdir(parents=True, exist_ok=True)
+        fallback_name = requested_path.name or model_path
+        if fallback_name != model_path:
+            return fallback_name
+        return model_path
 
     @contextmanager
     def _trusted_torch_load(self):
